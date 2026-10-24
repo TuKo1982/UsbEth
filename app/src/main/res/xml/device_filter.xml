@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- UsbEth - Copyright (C) 2026 Renaud Schweingruber - SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Adapters that launch the app when plugged in. All of them expose a CDC-ECM configuration. -->
+<resources>
+    <!-- Realtek RTL8153 (TP-Link UE300, etc.): CDC-ECM in configuration 2 -->
+    <usb-device vendor-id="3034" product-id="33107" />
+    <!-- Realtek RTL8152 (10/100): CDC-ECM in configuration 2 -->
+    <usb-device vendor-id="3034" product-id="33106" />
+    <!-- Realtek RTL8156 (2.5 GbE): CDC-ECM in configuration 3 -->
+    <usb-device vendor-id="3034" product-id="33110" />
+    <!-- ASIX AX88179B (UGREEN CM209, etc.): CDC-ECM in configuration 3 -->
+    <usb-device vendor-id="2965" product-id="6032" />
+    <!-- Any other adapter exposing a CDC-ECM configuration -->
+    <usb-device class="2" subclass="6" protocol="0" />
+</resources>
