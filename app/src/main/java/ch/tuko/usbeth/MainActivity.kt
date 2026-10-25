@@ -66,7 +66,7 @@ class MainActivity : AppCompatActivity() {
         warnView = findViewById(R.id.warn)
         btn = findViewById(R.id.btn)
         findViewById<TextView>(R.id.credits).text = Credits.footer
-        btn.setOnClickListener { if (EthVpnService.running) stopBridge() else connect() }
+        btn.setOnClickListener { if (EthVpnService.running || EthVpnService.waiting) stopBridge() else connect() }
         btn.requestFocus()
 
         ContextCompat.registerReceiver(
@@ -91,10 +91,14 @@ class MainActivity : AppCompatActivity() {
         if (i?.getBooleanExtra(EXTRA_AUTOCONNECT, false) == true && !EthVpnService.running) { connect(); return }
         if (i?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
             val dev: UsbDevice? = i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            // reconnection after a wake-up (the system dialog comes late, often once the service
+            // has already reconnected): no need to show the app over what the user is doing
+            val background = EthVpnService.running || EthVpnService.waiting
             if (dev != null && !EthVpnService.running) {
                 EthVpnService.log("adapter plugged in: ${dev.productName}")
                 proceed(dev)
             }
+            if (background) moveTaskToBack(true)
         }
     }
 
@@ -142,7 +146,7 @@ class MainActivity : AppCompatActivity() {
         val w = EthVpnService.warning
         warnView.text = w?.let { "⚠ $it" }
         warnView.visibility = if (w != null) View.VISIBLE else View.GONE
-        btn.text = if (EthVpnService.running) "Disconnect" else "Connect"
+        btn.text = if (EthVpnService.running || EthVpnService.waiting) "Disconnect" else "Connect"
     }
 
     override fun onResume() { super.onResume(); refresh() }

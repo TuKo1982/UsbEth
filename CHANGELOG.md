@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0 - 2026-10-25
+
+- Reconnects by itself after standby: the TV re-enumerates the adapter on wake-up, the service
+  now waits for it in the foreground instead of stopping, asks for the USB permission again
+  and brings the bridge back (about 15 s).
+- Optional `UsbAutoOkService` accessibility service (enabled with adb): confirms the system USB
+  dialog for our adapter and dismisses the redundant "open USB Ethernet?" dialog, so no remote
+  is needed at boot or wake-up.
+- The app no longer comes to the front when the system dialog launches it while the bridge is
+  already up or reconnecting.
+
 ## 1.0.0 - 2026-10-24
 
 First public release, by Renaud Schweingruber.

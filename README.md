@@ -23,6 +23,10 @@ Written by **Renaud Schweingruber**. Free software under the
   tested on hardware*).
 - Detects a USB 3.0 adapter that came up at **USB 2.0** and tells the user how to fix it.
 - **Starts at boot** and when an adapter is plugged in.
+- **Reconnects by itself after standby**: many TVs re-enumerate USB devices on wake-up; the
+  bridge waits for the adapter and comes back about 15 s later.
+- Optional **auto-OK** accessibility service that confirms the system USB dialog, for a
+  connection that comes back at boot and after standby without touching the remote.
 - IPv6 is captured and dropped instead of leaking through Wi-Fi.
 
 ## How it works
@@ -69,6 +73,30 @@ Android TV's USB dialog has no "always allow" option, so **USB permission does n
 reboot**. About a minute after the TV starts, UsbEth shows a toast, then the permission dialog:
 press **Up, then OK**. If the dialog is dismissed, it is shown again 15 s later, then a
 notification lets you retry.
+
+### After standby
+
+On wake-up the TV re-enumerates its USB devices: the adapter disappears and comes back, and its
+USB permission is lost. UsbEth stays in the foreground ("Waiting for the USB adapter"), asks for
+the permission again as soon as the adapter is back, and reconnects. Without auto-OK, press
+**Up, then OK** in the dialog.
+
+### Auto-OK (optional, no remote needed)
+
+The `USB Ethernet auto-OK` accessibility service presses OK in the system USB dialog when it asks
+access to a CDC-ECM adapter for USB Ethernet, and closes the redundant "open USB Ethernet?"
+dialog when access is already granted. It acts on nothing else (SystemUI windows naming both
+the app and the adapter only). Android TV has no screen to enable it, so use adb, keeping the
+services already enabled:
+
+```
+adb shell settings get secure enabled_accessibility_services     # e.g. other/.Service or null
+adb shell settings put secure enabled_accessibility_services <previous value>:ch.tuko.usbeth/.UsbAutoOkService
+adb shell settings put secure accessibility_enabled 1
+```
+
+(if the first command prints `null`, put `ch.tuko.usbeth/.UsbAutoOkService` alone). The log
+shows `auto-OK service enabled`. To disable it, put back the previous value.
 
 ## Good to know
 
@@ -117,11 +145,12 @@ TV=192.168.1.50:5555 ./deploy.sh
 | File | Role |
 |---|---|
 | `UsbEcm.kt` | ECM configuration, MAC address, link notifications, USB speed, sync and async bulk transfers |
-| `EthVpnService.kt` | VpnService, adapter selection, permission at boot, RX/TX threads, DHCP renewal, alerts |
+| `EthVpnService.kt` | VpnService, adapter selection, permission at boot, reconnection after wake-up, RX/TX threads, DHCP renewal, alerts |
 | `Dhcp.kt` | DHCP DISCOVER / REQUEST / renewal, OFFER / ACK parsing |
 | `Arp.kt` | ARP cache, requests and replies |
 | `MainActivity.kt` | USB permission, VPN consent, status screen |
 | `BootReceiver.kt` | Restart at boot |
+| `UsbAutoOkService.kt` | Optional accessibility service confirming the USB dialog |
 | `UsbUtil.kt`, `Net.kt` | Adapter detection, byte and IPv4 helpers |
 | `Credits.kt` | Version and author shown on screen and in the log |
 
@@ -130,7 +159,8 @@ TV=192.168.1.50:5555 ./deploy.sh
 - IPv4 only.
 - CDC-ECM only: adapters with only a vendor protocol (older ASIX AX88772 / AX88179, Microchip
   LAN78xx) or only CDC-NCM are not supported, nor phones in USB tethering mode.
-- The USB permission must be confirmed at every boot (Android TV limitation, see above).
+- The USB permission must be confirmed at every boot and wake-up (Android TV limitation, see
+  above), unless auto-OK is enabled.
 - If the DHCP server hands out a different address on renewal, the bridge stops and must be
   reconnected.
 

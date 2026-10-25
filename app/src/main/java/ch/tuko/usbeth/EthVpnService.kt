@@ -65,6 +65,8 @@ class EthVpnService : VpnService() {
 
         @Volatile var running = false
         @Volatile var statusText = "Stopped"
+        /** The adapter vanished while connected (USB re-enumeration at wake-up...): waiting for it. */
+        @Volatile var waiting = false
         private val lines = ArrayDeque<String>()
         @Volatile var listener: (() -> Unit)? = null
         /** Advice to show the user (USB 2.0 fallback...), null when all is well. */
@@ -113,8 +115,24 @@ class EthVpnService : VpnService() {
             val d: UsbDevice? = i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             if (d != null && ecm != null && d.deviceName == ecm!!.dev.deviceName) {
                 log("adapter unplugged")
-                stopBridge()
+                lostAdapter()
             }
+        }
+    }
+
+    /**
+     * The adapter is back after [lostAdapter]. Its permission was dropped with the old device:
+     * the system "open USB Ethernet?" dialog (MainActivity's intent filter) would grant it, but on
+     * Android TV it shows up ~10 s late, so we ask for permission ourselves.
+     */
+    private val attachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            val d: UsbDevice? = i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            if (!waiting || d == null || !UsbUtil.hasEcm(d)) return
+            log("adapter back: ${adapterName(d)}")
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (waiting && !running && !selecting) startSelection(d)
+            }, 2_000)
         }
     }
 
@@ -144,12 +162,13 @@ class EthVpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         registerReceiver(detachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
+        registerReceiver(attachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED))
         ContextCompat.registerReceiver(this, permReceiver, IntentFilter(ACTION_USB_PERM), ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> { log("stop requested"); stopBridge(); return START_NOT_STICKY }
+            ACTION_STOP -> { log("stop requested"); waiting = false; stopBridge(); return START_NOT_STICKY }
             ACTION_START -> {
                 // startForegroundService() requires startForeground() on every call, even if we stop right away
                 updateNotification(if (running) statusText else "Connecting...")
@@ -157,20 +176,26 @@ class EthVpnService : VpnService() {
                 if (dev == null) { log("no device in the intent"); stopBridge(); return START_NOT_STICKY }
                 if (running) { log("already running"); return START_STICKY }
                 if (selecting) { log("adapter selection already in progress"); return START_NOT_STICKY }
-                val usb = getSystemService(Context.USB_SERVICE) as UsbManager
-                // the requested adapter first, then the other CDC-ECM adapters plugged in
-                candidates.clear()
-                candidates.add(dev)
-                UsbUtil.findAdapters(usb).filter { it.deviceName != dev.deviceName }.forEach { candidates.add(it) }
-                multi = candidates.size > 1
-                fallbackDev = null; fallbackSilent = false
-                selecting = true
-                if (multi) log("${candidates.size} adapters plugged in: looking for the one with an Ethernet link")
-                nextCandidate()
+                startSelection(dev)
                 return START_NOT_STICKY
             }
         }
         return START_STICKY
+    }
+
+    private fun startSelection(dev: UsbDevice) {
+        // same service instance after lostAdapter(): clear its stop state
+        waiting = false; stopping = false; shutDown.set(false)
+        val usb = getSystemService(Context.USB_SERVICE) as UsbManager
+        // the requested adapter first, then the other CDC-ECM adapters plugged in
+        candidates.clear()
+        candidates.add(dev)
+        UsbUtil.findAdapters(usb).filter { it.deviceName != dev.deviceName }.forEach { candidates.add(it) }
+        multi = candidates.size > 1
+        fallbackDev = null; fallbackSilent = false
+        selecting = true
+        if (multi) log("${candidates.size} adapters plugged in: looking for the one with an Ethernet link")
+        nextCandidate()
     }
 
     private fun begin(dev: UsbDevice) {
@@ -495,7 +520,11 @@ class EthVpnService : VpnService() {
             if (n >= 0) errors = 0
             else {
                 if (++errors >= 50) {
-                    if (!stopping) { log("repeated USB receive errors"); stopBridge() }
+                    if (!stopping) {
+                        log("repeated USB receive errors")
+                        val usb = getSystemService(Context.USB_SERVICE) as UsbManager
+                        if (usb.deviceList.values.none { it.deviceName == e.dev.deviceName }) lostAdapter() else stopBridge()
+                    }
                     return
                 }
                 Thread.sleep(10)
@@ -649,6 +678,14 @@ class EthVpnService : VpnService() {
         stopSelf()
     }
 
+    /** Adapter gone while connected: close everything but stay in the foreground, waiting for it. */
+    private fun lostAdapter() {
+        shutdown("Adapter gone: waiting for it to come back")
+        waiting = true
+        updateNotification("Waiting for the USB adapter")
+        listener?.invoke()
+    }
+
     private val shutDown = AtomicBoolean(false)
 
     private fun shutdown(status: String = "Stopped") {
@@ -676,6 +713,7 @@ class EthVpnService : VpnService() {
     override fun onDestroy() {
         shutdown()
         try { unregisterReceiver(detachReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(attachReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(permReceiver) } catch (_: Exception) {}
         super.onDestroy()
     }

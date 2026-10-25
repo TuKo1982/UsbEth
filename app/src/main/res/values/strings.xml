@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">USB Ethernet</string>
+    <string name="auto_ok_label">USB Ethernet auto-OK</string>
+    <string name="auto_ok_description">Confirms the system USB dialog when it asks access to a USB Ethernet adapter for USB Ethernet, so that the connection comes back by itself after a wake-up or a reboot. Clicks nothing else.</string>
 </resources>
