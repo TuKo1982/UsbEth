@@ -109,13 +109,39 @@ class EthVpnService : VpnService() {
     @Volatile private var rxDropped = 0L
     @Volatile private var async = false
     @Volatile private var rxThread: Thread? = null
+    /** The bridge came up once and the user did not stop it: a failure leads to a retry. */
+    @Volatile private var autoReconnect = false
+    private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * While [waiting]: looks for an adapter in the device list, without relying on the ATTACHED
+     * broadcast alone (it can be missed when the adapter comes back while we are shutting down).
+     */
+    private val rescan = object : Runnable {
+        override fun run() {
+            if (!waiting) return
+            if (!running && !selecting) {
+                val usb = getSystemService(Context.USB_SERVICE) as UsbManager
+                val d = UsbUtil.findAdapters(usb).firstOrNull()
+                if (d != null) { log("adapter found: ${adapterName(d)} (${d.deviceName})"); startSelection(d); return }
+            }
+            main.postDelayed(this, 3_000)
+        }
+    }
+
+    private fun scheduleRescan(delayMs: Long) {
+        main.removeCallbacks(rescan)
+        main.postDelayed(rescan, delayMs)
+    }
 
     private val detachReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             val d: UsbDevice? = i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             if (d != null && ecm != null && d.deviceName == ecm!!.dev.deviceName) {
                 log("adapter unplugged")
-                lostAdapter()
+                // the shutdown waits for the USB threads: keep the main thread (broadcasts,
+                // auto-OK service) free meanwhile
+                Thread({ lostAdapter() }, "usbeth-stop").start()
             }
         }
     }
@@ -123,16 +149,14 @@ class EthVpnService : VpnService() {
     /**
      * The adapter is back after [lostAdapter]. Its permission was dropped with the old device:
      * the system "open USB Ethernet?" dialog (MainActivity's intent filter) would grant it, but on
-     * Android TV it shows up ~10 s late, so we ask for permission ourselves.
+     * Android TV it shows up ~10 s late, so we ask for permission ourselves (through [rescan]).
      */
     private val attachReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             val d: UsbDevice? = i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
             if (!waiting || d == null || !UsbUtil.hasEcm(d)) return
             log("adapter back: ${adapterName(d)}")
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (waiting && !running && !selecting) startSelection(d)
-            }, 2_000)
+            scheduleRescan(2_000)
         }
     }
 
@@ -168,7 +192,11 @@ class EthVpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> { log("stop requested"); waiting = false; stopBridge(); return START_NOT_STICKY }
+            ACTION_STOP -> {
+                log("stop requested")
+                waiting = false; autoReconnect = false; main.removeCallbacks(rescan)
+                stopBridge(); return START_NOT_STICKY
+            }
             ACTION_START -> {
                 // startForegroundService() requires startForeground() on every call, even if we stop right away
                 updateNotification(if (running) statusText else "Connecting...")
@@ -186,11 +214,16 @@ class EthVpnService : VpnService() {
     private fun startSelection(dev: UsbDevice) {
         // same service instance after lostAdapter(): clear its stop state
         waiting = false; stopping = false; shutDown.set(false)
+        main.removeCallbacks(rescan)
         val usb = getSystemService(Context.USB_SERVICE) as UsbManager
-        // the requested adapter first, then the other CDC-ECM adapters plugged in
+        // the requested adapter first, then the other CDC-ECM adapters plugged in. Only devices
+        // still present: a late system dialog can hand us an adapter re-enumerated since then
+        val present = UsbUtil.findAdapters(usb)
         candidates.clear()
-        candidates.add(dev)
-        UsbUtil.findAdapters(usb).filter { it.deviceName != dev.deviceName }.forEach { candidates.add(it) }
+        val req = present.firstOrNull { it.deviceName == dev.deviceName }
+        if (req != null) candidates.add(req)
+        else log("${adapterName(dev)} (${dev.deviceName}) is no longer plugged in, ignored")
+        present.filter { it.deviceName != dev.deviceName }.forEach { candidates.add(it) }
         multi = candidates.size > 1
         fallbackDev = null; fallbackSilent = false
         selecting = true
@@ -222,7 +255,11 @@ class EthVpnService : VpnService() {
         if (d == null) {
             val f = fallbackDev
             if (f != null) { log("no Ethernet link detected, trying ${adapterName(f)}"); begin(f) }
-            else { selecting = false; stopBridge("Failed: no usable adapter"); notifyRetry() }
+            else {
+                selecting = false
+                if (autoReconnect) retryLater("no usable adapter")
+                else { stopBridge("Failed: no usable adapter"); notifyRetry() }
+            }
             return
         }
         val usb = getSystemService(Context.USB_SERVICE) as UsbManager
@@ -267,7 +304,8 @@ class EthVpnService : VpnService() {
         val usb = getSystemService(Context.USB_SERVICE) as UsbManager
         val e = UsbEcm(usb, d) {}
         return try {
-            if (!e.open()) false else e.waitLink(4_000)
+            // the RTL8153 needs ~4 s after open() to report its link
+            if (!e.open()) false else e.waitLink(8_000)
         } catch (ex: Exception) {
             false
         } finally {
@@ -373,6 +411,7 @@ class EthVpnService : VpnService() {
             setStatus("Connected  ${Net.ipStr(l.ip)}/${l.prefix}  via ${adapterName(dev)} (${e.speed.label})")
             updateNotification("Connected ${Net.ipStr(l.ip)}")
             log("bridge up")
+            autoReconnect = true
 
             threads.add(Thread({ guarded { tunWriteLoop() } }, "usbeth-tun").also { it.start() })
             threads.add(Thread({ guarded { rxLoop() } }, "usbeth-rx").also { rxThread = it; it.start() })
@@ -436,7 +475,7 @@ class EthVpnService : VpnService() {
 
     private fun fail(msg: String) {
         log("failed: $msg")
-        stopBridge("Failed: $msg")
+        if (autoReconnect) retryLater(msg) else stopBridge("Failed: $msg")
     }
 
     // ------------------------------------------------------------------ dispatch
@@ -523,7 +562,8 @@ class EthVpnService : VpnService() {
                     if (!stopping) {
                         log("repeated USB receive errors")
                         val usb = getSystemService(Context.USB_SERVICE) as UsbManager
-                        if (usb.deviceList.values.none { it.deviceName == e.dev.deviceName }) lostAdapter() else stopBridge()
+                        if (usb.deviceList.values.none { it.deviceName == e.dev.deviceName }) lostAdapter()
+                        else fail("repeated USB receive errors")
                     }
                     return
                 }
@@ -679,11 +719,21 @@ class EthVpnService : VpnService() {
     }
 
     /** Adapter gone while connected: close everything but stay in the foreground, waiting for it. */
-    private fun lostAdapter() {
-        shutdown("Adapter gone: waiting for it to come back")
+    private fun lostAdapter() =
+        waitForAdapter("Adapter gone: waiting for it to come back", "Waiting for the USB adapter", 3_000)
+
+    /** Failure after the bridge was up (reconnection at wake-up...): try again instead of stopping. */
+    private fun retryLater(msg: String) {
+        log("retrying in 10 s")
+        waitForAdapter("Failed: $msg, retrying...", "Reconnecting...", 10_000)
+    }
+
+    private fun waitForAdapter(status: String, notif: String, delayMs: Long) {
+        shutdown(status)
         waiting = true
-        updateNotification("Waiting for the USB adapter")
+        updateNotification(notif)
         listener?.invoke()
+        scheduleRescan(delayMs)
     }
 
     private val shutDown = AtomicBoolean(false)
@@ -711,6 +761,7 @@ class EthVpnService : VpnService() {
     override fun onRevoke() { log("VPN revoked by the system"); stopBridge() }
 
     override fun onDestroy() {
+        main.removeCallbacks(rescan)
         shutdown()
         try { unregisterReceiver(detachReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(attachReceiver) } catch (_: Exception) {}

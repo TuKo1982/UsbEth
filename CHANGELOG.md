@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.1 - 2026-10-26
+
+- Reconnection after standby no longer depends on the USB "attached" broadcast alone: while
+  waiting, the service also looks for the adapter every 3 s (the broadcast could be missed when
+  the adapter came back during the shutdown, and the bridge then stayed down).
+- An adapter handed over by a late system USB dialog is ignored if it has been re-enumerated
+  since (it was counted as a second adapter, then selected and failed to open).
+- Once the bridge has been up, a failure (USB open, DHCP, gateway, IP change, USB errors) leads
+  to a new attempt every 10 s instead of a final stop. A stop requested by the user is final.
+- Link test when several adapters are plugged in: 8 s instead of 4 s (an RTL8153 needs ~4 s).
+- The shutdown after an unplug no longer blocks the main thread (broadcasts, auto-OK service).
+
 ## 1.1.0 - 2026-10-25
 
 - Reconnects by itself after standby: the TV re-enumerates the adapter on wake-up, the service
