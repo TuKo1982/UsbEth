@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.1 - 2026-10-26
+## 1.1.1 - 2026-10-28
 
 - Reconnection after standby no longer depends on the USB "attached" broadcast alone: while
   waiting, the service also looks for the adapter every 3 s (the broadcast could be missed when
@@ -11,6 +11,10 @@
   to a new attempt every 10 s instead of a final stop. A stop requested by the user is final.
 - Link test when several adapters are plugged in: 8 s instead of 4 s (an RTL8153 needs ~4 s).
 - The shutdown after an unplug no longer blocks the main thread (broadcasts, auto-OK service).
+- Fixed a race at wake-up: an adapter coming back while the previous session was still shutting
+  down started a new session that the old shutdown then closed (ConcurrentModificationException
+  in usbeth-rx, one lost 10 s retry). A new session now waits for the shutdown to finish.
+- The "frames dropped" count restarts with each session.
 
 ## 1.1.0 - 2026-10-25
 

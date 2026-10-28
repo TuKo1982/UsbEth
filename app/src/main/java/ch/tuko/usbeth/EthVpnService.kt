@@ -95,6 +95,8 @@ class EthVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private var tunOut: FileOutputStream? = null
     @Volatile private var stopping = false
+    /** shutdown() in progress: no new session until it has closed the previous one. */
+    @Volatile private var closing = false
     private val threads = ArrayList<Thread>()
 
     private lateinit var arp: Arp
@@ -120,7 +122,7 @@ class EthVpnService : VpnService() {
     private val rescan = object : Runnable {
         override fun run() {
             if (!waiting) return
-            if (!running && !selecting) {
+            if (!running && !selecting && !closing) {
                 val usb = getSystemService(Context.USB_SERVICE) as UsbManager
                 val d = UsbUtil.findAdapters(usb).firstOrNull()
                 if (d != null) { log("adapter found: ${adapterName(d)} (${d.deviceName})"); startSelection(d); return }
@@ -212,6 +214,9 @@ class EthVpnService : VpnService() {
     }
 
     private fun startSelection(dev: UsbDevice) {
+        // an adapter back while the old session is still closing: the rescan that follows
+        // the shutdown picks it up (resetting [stopping] now would revive the old loops)
+        if (closing) { log("still shutting down, ${adapterName(dev)} will be picked up by the next rescan"); return }
         // same service instance after lostAdapter(): clear its stop state
         waiting = false; stopping = false; shutDown.set(false)
         main.removeCallbacks(rescan)
@@ -233,9 +238,9 @@ class EthVpnService : VpnService() {
 
     private fun begin(dev: UsbDevice) {
         selecting = false
-        if (running) return
+        if (running || closing) return
         running = true; stopping = false; shutDown.set(false)
-        Thread({ worker(dev) }, "usbeth-main").also { threads.add(it) }.start()
+        spawn("usbeth-main") { worker(dev) }
     }
 
     private var permAttempts = 0
@@ -405,6 +410,9 @@ class EthVpnService : VpnService() {
             tun = t
             tunOut = FileOutputStream(t.fileDescriptor)
 
+            // frames left over by a previous session go back to the pool, the drop count restarts
+            while (true) rxFree.offer(rxFull.poll() ?: break)
+            rxDropped = 0
             if (!e.startAsync()) { fail("could not queue USB requests"); return }
             async = true
 
@@ -413,13 +421,21 @@ class EthVpnService : VpnService() {
             log("bridge up")
             autoReconnect = true
 
-            threads.add(Thread({ guarded { tunWriteLoop() } }, "usbeth-tun").also { it.start() })
-            threads.add(Thread({ guarded { rxLoop() } }, "usbeth-rx").also { rxThread = it; it.start() })
-            threads.add(Thread({ guarded { txLoop(t) } }, "usbeth-tx").also { it.start() })
+            spawn("usbeth-tun") { guarded { tunWriteLoop() } }
+            rxThread = spawn("usbeth-rx") { guarded { rxLoop() } }
+            spawn("usbeth-tx") { guarded { txLoop(t) } }
             renewLoop()
         } catch (ex: Exception) {
             if (!stopping) { log("error: $ex"); fail(ex.message ?: "error") }
         }
+    }
+
+    /** Starts a thread that shutdown() waits for (threads is shared with the stopping thread). */
+    private fun spawn(name: String, body: () -> Unit): Thread {
+        val th = Thread(body, name)
+        synchronized(threads) { threads.add(th) }
+        th.start()
+        return th
     }
 
     /** An exception in a loop stops the bridge instead of killing the process. */
@@ -741,20 +757,22 @@ class EthVpnService : VpnService() {
     private fun shutdown(status: String = "Stopped") {
         // called from several threads (button, unplug, USB error...): only once
         if (!shutDown.compareAndSet(false, true)) return
+        closing = true
         selecting = false; candidates.clear()
         stopping = true
         running = false
         // the loops see [stopping] within 1 s (USB / poll / sleep timeouts): wait for them before
         // closing, so that the USB connection is not closed under a running bulkTransfer
-        for (th in threads) if (th !== Thread.currentThread()) {
+        val ths = synchronized(threads) { threads.toList().also { threads.clear() } }
+        for (th in ths) if (th !== Thread.currentThread()) {
             try { th.join(1500) } catch (_: InterruptedException) {}
         }
-        threads.clear()
         async = false
         try { tun?.close() } catch (_: Exception) {}
         tun = null; tunOut = null
         try { ecm?.close() } catch (_: Exception) {}
         ecm = null
+        closing = false
         setStatus(status)
     }
 
