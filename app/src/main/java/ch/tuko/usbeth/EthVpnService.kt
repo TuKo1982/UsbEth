@@ -63,7 +63,11 @@ class EthVpnService : VpnService() {
         private const val TAG = "UsbEth"
         private const val CHANNEL = "usbeth"
         private const val NOTIF_ID = 1
-        private const val RX_FRAMES = 256
+        /**
+         * Frames between the USB thread and the TUN writer: absorbs the bursts of a gigabit LAN
+         * (the bridge is CPU-bound around 280 Mbit/s), like Linux's netdev backlog (1000).
+         */
+        private const val RX_FRAMES = 1024
         /** A selection step (permission answer, link probe) unanswered after this is abandoned. */
         private const val SELECT_TIMEOUT_MS = 60_000L
         /** A new start request takes over a selection idle for this long. */
@@ -118,6 +122,7 @@ class EthVpnService : VpnService() {
     private val rxFree = ArrayBlockingQueue<Frame>(RX_FRAMES).apply { repeat(RX_FRAMES) { add(Frame(ByteArray(2048))) } }
     private val rxFull = ArrayBlockingQueue<Frame>(RX_FRAMES)
     @Volatile private var rxDropped = 0L
+    @Volatile private var rxFrames = 0L
     @Volatile private var async = false
     @Volatile private var rxThread: Thread? = null
     /** The bridge came up once and the user did not stop it: a failure leads to a retry. */
@@ -502,7 +507,7 @@ class EthVpnService : VpnService() {
 
             // frames left over by a previous session go back to the pool, the drop count restarts
             while (true) rxFree.offer(rxFull.poll() ?: break)
-            rxDropped = 0
+            rxDropped = 0; rxFrames = 0; synchronized(dropLock) { epFirst = 0L }
             if (!e.startAsync()) { fail("could not queue USB requests"); return }
             async = true
 
@@ -790,19 +795,46 @@ class EthVpnService : VpnService() {
      * Queue full: the frame is dropped, as on an overrun network card.
      */
     private fun enqueueRx(f: ByteArray, n: Int) {
-        val fr = rxFree.poll() ?: run { rxDropped++; return }
+        rxFrames++
+        val fr = rxFree.poll() ?: run { rxDropped++; noteDrop(); return }
         System.arraycopy(f, 0, fr.buf, 0, n)
         fr.len = n
         rxFull.offer(fr)
     }
 
+    /**
+     * Drop episode, recorded by the USB thread at the time of each drop (the TUN thread notices
+     * them late): first and last drop, drops and frames received in between.
+     */
+    private val dropLock = Any()
+    private var epFirst = 0L; private var epLast = 0L
+    private var epDrops = 0L; private var epFrames0 = 0L; private var epFramesEnd = 0L
+
+    private fun noteDrop() = synchronized(dropLock) {
+        val now = SystemClock.elapsedRealtime()
+        if (epFirst == 0L) { epFirst = now; epDrops = 0; epFrames0 = rxFrames - 1 }
+        epLast = now; epDrops++; epFramesEnd = rxFrames
+    }
+
+    /** Logs the episode once 10 s pass without a drop. */
+    private fun reportDrops() {
+        val msg = synchronized(dropLock) {
+            if (epFirst == 0L || SystemClock.elapsedRealtime() - epLast < 10_000) return
+            val total = epFramesEnd - epFrames0
+            val m = "$epDrops of $total frames dropped in ${(epLast - epFirst) / 1000 + 1} s (receive queue full: " +
+                "burst faster than the bridge, TCP slows down) - ${"%.3f".format(Locale.US, 100.0 * epDrops / total)}%"
+            epFirst = 0L
+            m
+        }
+        log(msg)
+    }
+
     /** Parses received frames (ARP, DHCP, IPv4) and writes IPv4 to the TUN. */
     private fun tunWriteLoop() {
-        var reported = 0L
         while (!stopping) {
-            val fr = rxFull.poll(500, TimeUnit.MILLISECONDS) ?: continue
-            try { handleFrame(fr.buf, fr.len) } finally { rxFree.offer(fr) }
-            if (rxDropped - reported >= 1000) { reported = rxDropped; log("$rxDropped frames dropped (TUN queue full)") }
+            val fr = rxFull.poll(500, TimeUnit.MILLISECONDS)
+            if (fr != null) try { handleFrame(fr.buf, fr.len) } finally { rxFree.offer(fr) }
+            reportDrops()
         }
     }
 

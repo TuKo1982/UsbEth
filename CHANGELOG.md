@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.2 - 2026-10-30
+
+- Receive queue between the USB thread and the TUN writer: 1024 frames instead of 256 (like
+  Linux's netdev backlog). Bursts from a gigabit LAN overflowed it: measured on 1 GB downloads,
+  about 200-400 frames dropped per GB with 256 (0.03-0.06%), 13-430 with 1024; same throughput
+  (about 260-300 Mbit/s, CPU-bound).
+- Drops are reported per episode, once 10 s pass without any: count, frames received meanwhile,
+  duration and rate (the old "N frames dropped" line every 1000 drops said nothing of the rate).
+
 ## 1.2.1 - 2026-10-30
 
 - As soon as an update is downloaded and verified, a dialog offers to install it now (with the
