@@ -14,6 +14,9 @@
  */
 package ch.tuko.usbeth
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -41,10 +44,15 @@ import java.security.MessageDigest
 object Updater {
     const val RELEASES_API = "https://api.github.com/repos/TuKo1982/UsbEth/releases/latest"
     private const val ACTION_INSTALL_STATUS = "ch.tuko.usbeth.INSTALL_STATUS"
+    const val NOTIF_ID = 4
+    private const val CHANNEL = "usbeth_update"
 
     /** Version downloaded and verified, ready to install (null: none). */
     @Volatile var ready: String? = null
     @Volatile var lastResult: String? = null
+    /** Release notes of [ready] (GitHub release body). */
+    @Volatile var notes = ""
+    @Volatile private var justDownloaded = false
     @Volatile private var busy = false
 
     private fun apk(ctx: Context) = File(ctx.filesDir, "update.apk")
@@ -64,6 +72,7 @@ object Updater {
                 busy = false
             }
             EthVpnService.log(lastResult!!)
+            if (justDownloaded) { justDownloaded = false; offer(ctx.applicationContext) }
             done?.invoke()
         }, "usbeth-update").start()
     }
@@ -100,6 +109,8 @@ object Updater {
         verifyApk(ctx, tmp)?.let { tmp.delete(); return "update $latest: $it, discarded" }
         if (!tmp.renameTo(apk(ctx))) return "update $latest: cannot store the APK"
         ready = latest
+        notes = rel.optString("body")
+        justDownloaded = true
         return "update $latest downloaded and verified, installed when the screen is off"
     }
 
@@ -119,6 +130,25 @@ object Updater {
         val si = p.signingInfo ?: return emptySet()
         val sigs = if (si.hasMultipleSigners()) si.apkContentsSigners else si.signingCertificateHistory
         return sigs.map { MessageDigest.getInstance("SHA-256").digest(it.toByteArray()).hex() }.toSet()
+    }
+
+    /**
+     * Offers the install at once: the dialog, plus a notification in case Android does not let
+     * the dialog open from the background (allowed here while the auto-OK service is enabled).
+     */
+    private fun offer(ctx: Context) {
+        val open = Intent(ctx, UpdateActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        val nm = ctx.getSystemService(NotificationManager::class.java)
+        nm.createNotificationChannel(NotificationChannel(CHANNEL, "USB Ethernet updates", NotificationManager.IMPORTANCE_HIGH))
+        nm.notify(NOTIF_ID, Notification.Builder(ctx, CHANNEL)
+            .setSmallIcon(R.drawable.ic_eth)
+            .setContentTitle("USB Ethernet $ready is available")
+            .setContentText("Select to install it now, otherwise it is installed when the screen is off.")
+            .setContentIntent(PendingIntent.getActivity(ctx, 4, open, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+            .setAutoCancel(true)
+            .build())
+        try { ctx.startActivity(open) } catch (e: Exception) { EthVpnService.log("update: cannot open the install dialog (${e.message})") }
     }
 
     /** Installs the downloaded update. The process is killed when the install succeeds. */

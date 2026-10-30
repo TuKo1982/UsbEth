@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- UsbEth - Copyright (C) 2026 Renaud Schweingruber - SPDX-License-Identifier: GPL-3.0-or-later -->
+<resources>
+    <!-- update offer: only the dialog shows, over whatever is on screen -->
+    <style name="Theme.UsbEth.Transparent" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+</resources>

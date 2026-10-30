@@ -70,6 +70,14 @@
             </intent-filter>
         </receiver>
 
+        <activity
+            android:name=".UpdateActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/Theme.UsbEth.Transparent" />
+
         <receiver android:name=".Updater$StatusReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="ch.tuko.usbeth.INSTALL_STATUS" />

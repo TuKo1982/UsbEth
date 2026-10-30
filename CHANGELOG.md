@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 - 2026-10-30
+
+- As soon as an update is downloaded and verified, a dialog offers to install it now (with the
+  release notes) or later (then installed when the screen is off), plus a notification in case
+  the dialog cannot open from the background. The dialog shows alone over the current app.
+
 ## 1.2.0 - 2026-10-30
 
 - Updates from the GitHub releases: checked 2 min after the bridge is up, then every 12 h; the

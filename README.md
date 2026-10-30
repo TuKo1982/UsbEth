@@ -103,11 +103,12 @@ shows `auto-OK service enabled`. To disable it, put back the previous value.
 
 While the bridge is up, the app checks the latest GitHub release 2 minutes after connecting,
 then every 12 hours. A newer version is downloaded and kept only if its SHA-256 matches the
-release's `SHA256SUMS` and the APK is signed with the same certificate as the installed app. It is
-installed the next time the screen turns off (installing restarts the app, so the network drops
-for a few seconds), and the bridge comes back by itself. `Check for updates` on the app screen
-checks at once; once an update is downloaded, the button installs it right away. Android 12+
-installs it without a dialog; otherwise it asks for a confirmation.
+release's `SHA256SUMS` and the APK is signed with the same certificate as the installed app. A
+dialog then offers to install it at once; otherwise it is installed the next time the screen
+turns off. Installing restarts the app, so the network drops for a few seconds, and the bridge
+comes back by itself. `Check for updates` on the app screen checks at once; once an update is
+downloaded, the button installs it right away. Android 12+ installs it without a confirmation
+dialog; older versions ask for one.
 
 From adb: `adb shell am start -n ch.tuko.usbeth/.MainActivity --ez checkupdate true`.
 
