@@ -28,6 +28,7 @@ Written by **Renaud Schweingruber**. Free software under the
 - Optional **auto-OK** accessibility service that confirms the system USB dialog, for a
   connection that comes back at boot and after standby without touching the remote.
 - IPv6 is captured and dropped instead of leaking through Wi-Fi.
+- **Updates itself** from the GitHub releases, while the screen is off.
 
 ## How it works
 
@@ -98,6 +99,18 @@ adb shell settings put secure accessibility_enabled 1
 (if the first command prints `null`, put `ch.tuko.usbeth/.UsbAutoOkService` alone). The log
 shows `auto-OK service enabled`. To disable it, put back the previous value.
 
+### Updates
+
+While the bridge is up, the app checks the latest GitHub release 2 minutes after connecting,
+then every 12 hours. A newer version is downloaded and kept only if its SHA-256 matches the
+release's `SHA256SUMS` and the APK is signed with the same certificate as the installed app. It is
+installed the next time the screen turns off (installing restarts the app, so the network drops
+for a few seconds), and the bridge comes back by itself. `Check for updates` on the app screen
+checks at once; once an update is downloaded, the button installs it right away. Android 12+
+installs it without a dialog; otherwise it asks for a confirmation.
+
+From adb: `adb shell am start -n ch.tuko.usbeth/.MainActivity --ez checkupdate true`.
+
 ## Good to know
 
 - Android shows the connection as a **VPN** (key icon), not as "Ethernet". All apps go through
@@ -149,7 +162,8 @@ TV=192.168.1.50:5555 ./deploy.sh
 | `Dhcp.kt` | DHCP DISCOVER / REQUEST / renewal, OFFER / ACK parsing |
 | `Arp.kt` | ARP cache, requests and replies |
 | `MainActivity.kt` | USB permission, VPN consent, status screen |
-| `BootReceiver.kt` | Restart at boot |
+| `BootReceiver.kt` | Restart at boot and after an update |
+| `Updater.kt` | Update from the GitHub releases (checksum and signature checks, install) |
 | `UsbAutoOkService.kt` | Optional accessibility service confirming the USB dialog |
 | `UsbUtil.kt`, `Net.kt` | Adapter detection, byte and IPv4 helpers |
 | `Credits.kt` | Version and author shown on screen and in the log |

@@ -21,18 +21,22 @@ import android.hardware.usb.UsbManager
 import android.net.VpnService
 
 /**
- * At boot: if an adapter is already plugged in and VPN consent was given before, restart the
+ * At boot, and after an update (MY_PACKAGE_REPLACED: installing killed the bridge): if an adapter is already plugged in and VPN consent was given before, restart the
  * bridge. USB permission is not required here: without a "use by default" association Android
  * does not grant it at boot, so the service asks for it.
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        val what = when (intent.action) {
+            Intent.ACTION_BOOT_COMPLETED -> "boot"
+            Intent.ACTION_MY_PACKAGE_REPLACED -> "updated to ${BuildConfig.VERSION_NAME}"
+            else -> return
+        }
         val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
         val dev = UsbUtil.findAdapter(usb)
-        if (dev == null) { EthVpnService.log("boot: no CDC-ECM adapter plugged in"); return }
-        if (VpnService.prepare(ctx) != null) { EthVpnService.log("boot: no VPN consent yet, open the app"); return }
-        EthVpnService.log("boot: ${dev.productName}, USB permission ${if (usb.hasPermission(dev)) "granted" else "to be requested"}")
+        if (dev == null) { EthVpnService.log("$what: no CDC-ECM adapter plugged in"); return }
+        if (VpnService.prepare(ctx) != null) { EthVpnService.log("$what: no VPN consent yet, open the app"); return }
+        EthVpnService.log("$what: ${dev.productName}, USB permission ${if (usb.hasPermission(dev)) "granted" else "to be requested"}")
         val i = Intent(ctx, EthVpnService::class.java)
             .setAction(EthVpnService.ACTION_START)
             .putExtra(UsbManager.EXTRA_DEVICE, dev)

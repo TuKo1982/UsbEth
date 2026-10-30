@@ -39,6 +39,9 @@ class MainActivity : AppCompatActivity() {
         private const val REQ_VPN = 1
         private const val REQ_NOTIF = 2
         const val EXTRA_AUTOCONNECT = "autoconnect"
+        /** --ez checkupdate true [--es update_api <url>]: check now (tests with another release feed). */
+        const val EXTRA_CHECKUPDATE = "checkupdate"
+        const val EXTRA_UPDATE_API = "update_api"
     }
 
     private lateinit var usb: UsbManager
@@ -46,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logView: TextView
     private lateinit var warnView: TextView
     private lateinit var btn: Button
+    private lateinit var updBtn: Button
     private var pendingDev: UsbDevice? = null
 
     private val permReceiver = object : BroadcastReceiver() {
@@ -68,6 +72,11 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.credits).text = Credits.footer
         btn.setOnClickListener { if (EthVpnService.running || EthVpnService.waiting) stopBridge() else connect() }
         btn.requestFocus()
+        updBtn = findViewById(R.id.update)
+        updBtn.setOnClickListener {
+            // a click is the user's consent: install at once if downloaded, else check
+            if (Updater.ready != null) Updater.install(this) else checkUpdate(Updater.RELEASES_API)
+        }
 
         ContextCompat.registerReceiver(
             this, permReceiver, IntentFilter(ACTION_USB_PERM), ContextCompat.RECEIVER_NOT_EXPORTED
@@ -86,7 +95,16 @@ class MainActivity : AppCompatActivity() {
         handleIntent(intent)
     }
 
+    private fun checkUpdate(api: String) {
+        if (Updater.ready == null) EthVpnService.log("checking for updates")
+        Updater.check(this, api) { runOnUiThread { refresh() } }
+    }
+
     private fun handleIntent(i: Intent?) {
+        if (i?.getBooleanExtra(EXTRA_CHECKUPDATE, false) == true) {
+            // only a newer APK signed with our own key is ever installed, whatever the feed
+            checkUpdate(i.getStringExtra(EXTRA_UPDATE_API) ?: Updater.RELEASES_API)
+        }
         // am start ... --ez autoconnect true: start without the remote (adb deployment, retry notification)
         if (i?.getBooleanExtra(EXTRA_AUTOCONNECT, false) == true && !EthVpnService.running) { connect(); return }
         if (i?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
@@ -147,6 +165,7 @@ class MainActivity : AppCompatActivity() {
         warnView.text = w?.let { "⚠ $it" }
         warnView.visibility = if (w != null) View.VISIBLE else View.GONE
         btn.text = if (EthVpnService.running || EthVpnService.waiting) "Disconnect" else "Connect"
+        updBtn.text = Updater.ready?.let { "Install update $it" } ?: "Check for updates"
     }
 
     override fun onResume() { super.onResume(); refresh() }

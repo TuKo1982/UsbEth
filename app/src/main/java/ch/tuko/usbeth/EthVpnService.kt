@@ -29,7 +29,9 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
@@ -62,6 +64,13 @@ class EthVpnService : VpnService() {
         private const val CHANNEL = "usbeth"
         private const val NOTIF_ID = 1
         private const val RX_FRAMES = 256
+        /** A selection step (permission answer, link probe) unanswered after this is abandoned. */
+        private const val SELECT_TIMEOUT_MS = 60_000L
+        /** A new start request takes over a selection idle for this long. */
+        private const val SELECT_STALE_MS = 30_000L
+        /** Update check: once shortly after the bridge is up, then at this interval. */
+        private const val UPDATE_FIRST_MS = 120_000L
+        private const val UPDATE_EVERY_MS = 12 * 3600_000L
 
         @Volatile var running = false
         @Volatile var statusText = "Stopped"
@@ -139,6 +148,11 @@ class EthVpnService : VpnService() {
     private val detachReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             val d: UsbDevice? = i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            if (d != null && selecting && ecm == null &&
+                (d.deviceName == pendingDev?.deviceName || candidates.any { it.deviceName == d.deviceName })) {
+                abortSelection("${adapterName(d)} unplugged during the selection")
+                return
+            }
             if (d != null && ecm != null && d.deviceName == ecm!!.dev.deviceName) {
                 log("adapter unplugged")
                 // the shutdown waits for the USB threads: keep the main thread (broadcasts,
@@ -166,11 +180,16 @@ class EthVpnService : VpnService() {
     private val permReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             val d: UsbDevice? = i.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-            if (i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) && d != null) {
+            // a late dialog (auto-OK, remote) can answer for a device no longer being selected
+            if (!selecting || d == null || d.deviceName != pendingDev?.deviceName) {
+                log("USB permission answer for ${d?.deviceName} ignored: not the adapter being selected")
+                return
+            }
+            if (i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                 log("USB permission granted")
                 getSystemService(NotificationManager::class.java).cancel(RETRY_ID)
                 onPermitted(d)
-            } else if (d != null && permAttempts < 2) {
+            } else if (permAttempts < 2) {
                 // a remote key press often lands on the dialog (focus is on "Cancel"): ask again
                 log("USB permission denied, asking again in 15 s")
                 askPermission(d, 15_000)
@@ -185,8 +204,32 @@ class EthVpnService : VpnService() {
         }
     }
 
+    // ------------------------------------------------------------------ updates
+
+    /** Looks for a newer GitHub release while the bridge is up (the only network of the TV). */
+    private val updateCheck = object : Runnable {
+        override fun run() {
+            main.removeCallbacks(this)
+            if (!running) return
+            Updater.check(this@EthVpnService) { main.post { installUpdateIfIdle() } }
+            main.postDelayed(this, UPDATE_EVERY_MS)
+        }
+    }
+
+    /** Installing kills the bridge: only while nobody is watching (screen off). */
+    private fun installUpdateIfIdle() {
+        if (Updater.ready == null) return
+        if (getSystemService(PowerManager::class.java).isInteractive) return
+        Updater.install(this)
+    }
+
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) { installUpdateIfIdle() }
+    }
+
     override fun onCreate() {
         super.onCreate()
+        registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
         registerReceiver(detachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
         registerReceiver(attachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED))
         ContextCompat.registerReceiver(this, permReceiver, IntentFilter(ACTION_USB_PERM), ContextCompat.RECEIVER_NOT_EXPORTED)
@@ -205,7 +248,12 @@ class EthVpnService : VpnService() {
                 val dev: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                 if (dev == null) { log("no device in the intent"); stopBridge(); return START_NOT_STICKY }
                 if (running) { log("already running"); return START_STICKY }
-                if (selecting) { log("adapter selection already in progress"); return START_NOT_STICKY }
+                if (selecting) {
+                    val age = SystemClock.elapsedRealtime() - selStep
+                    if (age < SELECT_STALE_MS) { log("adapter selection already in progress"); return START_NOT_STICKY }
+                    log("adapter selection stuck for ${age / 1000} s, starting over")
+                    endSelection()
+                }
                 startSelection(dev)
                 return START_NOT_STICKY
             }
@@ -231,13 +279,14 @@ class EthVpnService : VpnService() {
         present.filter { it.deviceName != dev.deviceName }.forEach { candidates.add(it) }
         multi = candidates.size > 1
         fallbackDev = null; fallbackSilent = false
-        selecting = true
+        selecting = true; selGen++; markStep()
+        main.removeCallbacks(selWatchdog); main.postDelayed(selWatchdog, SELECT_TIMEOUT_MS)
         if (multi) log("${candidates.size} adapters plugged in: looking for the one with an Ethernet link")
         nextCandidate()
     }
 
     private fun begin(dev: UsbDevice) {
-        selecting = false
+        endSelection()
         if (running || closing) return
         running = true; stopping = false; shutDown.set(false)
         spawn("usbeth-main") { worker(dev) }
@@ -250,6 +299,42 @@ class EthVpnService : VpnService() {
     private val candidates = ArrayDeque<UsbDevice>()
     private var multi = false
     @Volatile private var selecting = false
+    /** Bumped at each selection: callbacks (dialog, probe) of an older one are dropped. */
+    @Volatile private var selGen = 0
+    /** Adapter whose permission answer or link probe is awaited. */
+    @Volatile private var pendingDev: UsbDevice? = null
+    /** Time of the last selection step (elapsedRealtime). */
+    @Volatile private var selStep = 0L
+
+    private fun markStep() { selStep = SystemClock.elapsedRealtime() }
+
+    private fun endSelection() {
+        selecting = false; selGen++; pendingDev = null; candidates.clear()
+        main.removeCallbacks(selWatchdog)
+    }
+
+    /**
+     * A selection step got no answer (permission dialog closed or lost, adapter re-enumerated
+     * meanwhile): instead of staying "in progress" forever, start over from the device list.
+     */
+    private val selWatchdog = object : Runnable {
+        override fun run() {
+            if (!selecting) return
+            val age = SystemClock.elapsedRealtime() - selStep
+            if (age < SELECT_TIMEOUT_MS) { main.postDelayed(this, SELECT_TIMEOUT_MS - age); return }
+            abortSelection("no answer for ${pendingDev?.let { adapterName(it) } ?: "the adapter"} in ${age / 1000} s")
+        }
+    }
+
+    /** Drops the current selection and waits for an adapter again (rescan every 3 s). */
+    private fun abortSelection(why: String) {
+        log("selection abandoned: $why")
+        endSelection()
+        waiting = true
+        updateNotification("Waiting for the USB adapter")
+        setStatus("Waiting for the USB adapter")
+        scheduleRescan(3_000)
+    }
     /** Used if no adapter reports a link: one that does not report link state, else the first one. */
     private var fallbackDev: UsbDevice? = null
     private var fallbackSilent = false
@@ -257,11 +342,12 @@ class EthVpnService : VpnService() {
     /** Tries the next candidate (main thread): permission first if needed, then the link test. */
     private fun nextCandidate() {
         val d = candidates.removeFirstOrNull()
+        pendingDev = d; markStep()
         if (d == null) {
             val f = fallbackDev
             if (f != null) { log("no Ethernet link detected, trying ${adapterName(f)}"); begin(f) }
             else {
-                selecting = false
+                endSelection()
                 if (autoReconnect) retryLater("no usable adapter")
                 else { stopBridge("Failed: no usable adapter"); notifyRetry() }
             }
@@ -280,10 +366,12 @@ class EthVpnService : VpnService() {
 
     private fun onPermitted(d: UsbDevice) {
         if (!multi) { begin(d); return }
+        val gen = selGen
+        markStep()
         Thread({
             val up = probeLink(d)
             Handler(Looper.getMainLooper()).post {
-                if (stopping) return@post
+                if (stopping || gen != selGen) return@post
                 when (up) {
                     true -> {
                         log("Ethernet link on ${adapterName(d)} (${d.deviceName}): adapter selected")
@@ -324,11 +412,13 @@ class EthVpnService : VpnService() {
      */
     private fun askPermission(dev: UsbDevice, delayMs: Long) {
         permAttempts++
+        val gen = selGen
+        markStep()
         setStatus("USB adapter access requested: choose OK")
         updateNotification("Allow the USB adapter: choose OK")
         toast("USB Ethernet: a dialog will ask for access to the adapter.\nPress Up, then OK to allow it.")
         Handler(Looper.getMainLooper()).postDelayed({
-            if (running || stopping) return@postDelayed
+            if (running || stopping || gen != selGen) return@postDelayed
             val usb = getSystemService(Context.USB_SERVICE) as UsbManager
             val pi = PendingIntent.getBroadcast(
                 this, 1, Intent(ACTION_USB_PERM).setPackage(packageName),
@@ -420,6 +510,7 @@ class EthVpnService : VpnService() {
             updateNotification("Connected ${Net.ipStr(l.ip)}")
             log("bridge up")
             autoReconnect = true
+            main.removeCallbacks(updateCheck); main.postDelayed(updateCheck, UPDATE_FIRST_MS)
 
             spawn("usbeth-tun") { guarded { tunWriteLoop() } }
             rxThread = spawn("usbeth-rx") { guarded { rxLoop() } }
@@ -758,7 +849,10 @@ class EthVpnService : VpnService() {
         // called from several threads (button, unplug, USB error...): only once
         if (!shutDown.compareAndSet(false, true)) return
         closing = true
-        selecting = false; candidates.clear()
+        // candidates/watchdog belong to the main thread; a newer selection is left alone
+        val gen = selGen
+        main.post { if (gen == selGen) endSelection() }
+        selecting = false
         stopping = true
         running = false
         // the loops see [stopping] within 1 s (USB / poll / sleep timeouts): wait for them before
@@ -784,6 +878,8 @@ class EthVpnService : VpnService() {
         try { unregisterReceiver(detachReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(attachReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(permReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(screenOffReceiver) } catch (_: Exception) {}
+        main.removeCallbacks(updateCheck)
         super.onDestroy()
     }
 

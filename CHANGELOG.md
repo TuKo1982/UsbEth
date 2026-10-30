@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.0 - 2026-10-30
+
+- Updates from the GitHub releases: checked 2 min after the bridge is up, then every 12 h; the
+  APK is kept only if its SHA-256 matches SHA256SUMS and it is signed with the installed app's
+  certificate; installed when the screen turns off (no dialog on Android 12+), the bridge is
+  restarted after the update. `Check for updates` / `Install update` button on the app screen.
+- The service could stay stuck on "adapter selection already in progress": if the USB
+  permission answer never came (dialog closed or lost, adapter re-enumerated meanwhile) or the
+  adapter vanished during the selection, nothing ended it and every start request was refused.
+  A selection step without an answer for 60 s is now abandoned and the service goes back to
+  waiting for an adapter (rescan every 3 s); an adapter unplugged during the selection does the
+  same at once; a start request takes over a selection idle for 30 s.
+- Permission answers and link probes from an older selection are ignored.
+
 ## 1.1.1 - 2026-10-28
 
 - Reconnection after standby no longer depends on the USB "attached" broadcast alone: while

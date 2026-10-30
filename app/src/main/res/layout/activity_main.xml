@@ -34,12 +34,23 @@
             android:fontFamily="monospace"
             android:textColor="#B0BEC5"
             android:textSize="14sp" />
-        <Button
-            android:id="@+id/btn"
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
-            android:text="Connect" />
+            android:orientation="horizontal">
+            <Button
+                android:id="@+id/btn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Connect" />
+            <Button
+                android:id="@+id/update"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="16dp"
+                android:text="Check for updates" />
+        </LinearLayout>
         <TextView
             android:id="@+id/credits"
             android:layout_width="match_parent"
