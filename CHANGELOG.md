@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.3 - 2026-11-03
+
+- Auto-OK: the "open USB Ethernet?" dialog could stay on screen after a wake-up until someone
+  pressed a button, although the bridge was already up. It sits under the "allow" dialog and comes
+  back within 2 s of the OK press, while the service was ignoring events, and no further event
+  arrived. Each SystemUI event now starts a 15 s watch that re-checks the active window, which also
+  retries a click that had no effect.
+- OK in the "open" dialog grants access too, so the "allow" dialog never shows: bridge up 8 s after
+  the wake-up, with the dialog on screen for about 1 s.
+
 ## 1.2.2 - 2026-10-30
 
 - Receive queue between the USB thread and the TUN writer: 1024 frames instead of 256 (like

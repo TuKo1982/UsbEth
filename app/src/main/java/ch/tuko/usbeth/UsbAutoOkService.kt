@@ -17,6 +17,8 @@ package ch.tuko.usbeth
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.hardware.usb.UsbManager
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -31,6 +33,10 @@ import android.view.accessibility.AccessibilityNodeInfo
  * no permission for that adapter yet, otherwise Back. The "open USB Ethernet?" dialog shows up
  * ~10 s after the adapter, once the service has already obtained access and reconnected, and
  * would stay on screen.
+ *
+ * Both dialogs can be stacked: "open" sits under "allow" and comes back when "allow" closes, with
+ * no later event to act on. So every SystemUI event also starts a short watch that re-checks the
+ * active window, instead of relying on an event arriving at the right moment.
  */
 class UsbAutoOkService : AccessibilityService() {
 
@@ -38,18 +44,45 @@ class UsbAutoOkService : AccessibilityService() {
         private const val SYSTEMUI = "com.android.systemui"
         private val POSITIVE_IDS = listOf("$SYSTEMUI:id/bottom_sheet_positive_button", "android:id/button1")
         private val POSITIVE_TEXTS = setOf("ok", "allow", "open", "autoriser", "ouvrir", "zulassen", "öffnen")
+        /** Minimum time between two actions; also the retry period if a click had no effect. */
+        private const val ACTION_GAP_MS = 2000L
+        private const val WATCH_PERIOD_MS = 500L
+        private const val WATCH_MS = 15000L
     }
 
+    private val handler = Handler(Looper.getMainLooper())
     private var lastAction = 0L
+    private var watchUntil = 0L
+    private val watch = object : Runnable {
+        override fun run() {
+            check()
+            if (SystemClock.uptimeMillis() < watchUntil) handler.postDelayed(this, WATCH_PERIOD_MS)
+        }
+    }
 
     override fun onServiceConnected() { EthVpnService.log("auto-OK service enabled") }
 
     override fun onInterrupt() {}
 
+    override fun onDestroy() {
+        handler.removeCallbacks(watch)
+        super.onDestroy()
+    }
+
     override fun onAccessibilityEvent(ev: AccessibilityEvent) {
         if (ev.packageName != SYSTEMUI) return
         val now = SystemClock.uptimeMillis()
-        if (now - lastAction < 2000) return
+        if (now >= watchUntil) {
+            handler.removeCallbacks(watch)
+            handler.postDelayed(watch, WATCH_PERIOD_MS)
+        }
+        watchUntil = now + WATCH_MS
+        check()
+    }
+
+    private fun check() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastAction < ACTION_GAP_MS) return
         val usb = getSystemService(Context.USB_SERVICE) as UsbManager
         val adapters = UsbUtil.findAdapters(usb)
         if (adapters.isEmpty()) return
