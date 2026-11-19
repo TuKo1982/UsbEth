@@ -25,6 +25,10 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.Handler
@@ -57,6 +61,12 @@ import java.util.Locale
 class EthVpnService : VpnService() {
 
     companion object {
+        /** NetworkCapabilities.TRANSPORT_TEST (hidden constant). */
+        private const val TRANSPORT_TEST = 7
+        private const val BASENET_CHECK_MS = 5_000L
+        private const val BASENET_RETRY_MS = 60_000L
+        private const val BASENET_MAX_ATTEMPTS = 3
+        private const val BASENET_LOG = "/data/local/tmp/usbeth-basenet.log"
         const val ACTION_START = "ch.tuko.usbeth.START"
         const val ACTION_STOP = "ch.tuko.usbeth.STOP"
         private const val ACTION_USB_PERM = "ch.tuko.usbeth.USB_PERMISSION_SVC"
@@ -96,7 +106,18 @@ class EthVpnService : VpnService() {
                 while (lines.size > 60) lines.removeFirst()
             }
             listener?.invoke()
+            logFile?.let { f ->
+                try {
+                    synchronized(lines) {
+                        if (f.length() > 256 * 1024) f.renameTo(java.io.File(f.path + ".1"))
+                        f.appendText("${fmtFile.format(Date())} $s\n")
+                    }
+                } catch (_: Exception) {}
+            }
         }
+        /** Copy of the log readable over adb: Android/data/ch.tuko.usbeth/files/usbeth.log */
+        @Volatile var logFile: java.io.File? = null
+        private val fmtFile = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US)
         fun logText(): String = synchronized(lines) { lines.joinToString("\n") }
         private fun setStatus(s: String) { statusText = s; listener?.invoke() }
 
@@ -234,6 +255,7 @@ class EthVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        if (logFile == null) logFile = getExternalFilesDir(null)?.let { java.io.File(it, "usbeth.log") }
         registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
         registerReceiver(detachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
         registerReceiver(attachReceiver, IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED))
@@ -517,6 +539,7 @@ class EthVpnService : VpnService() {
             autoReconnect = true
             main.removeCallbacks(updateCheck); main.postDelayed(updateCheck, UPDATE_FIRST_MS)
 
+            watchUnderlying()
             spawn("usbeth-tun") { guarded { tunWriteLoop() } }
             rxThread = spawn("usbeth-rx") { guarded { rxLoop() } }
             spawn("usbeth-tx") { guarded { txLoop(t) } }
@@ -877,6 +900,98 @@ class EthVpnService : VpnService() {
 
     private val shutDown = AtomicBoolean(false)
 
+    // A VPN with no underlying network is metered and congested for Android, whatever the
+    // builder says: Play Store downloads and other background jobs then wait forever. BaseNet
+    // (run as the shell user through the local adb) provides an unmetered virtual Ethernet card
+    // that the VPN declares as its underlying network. See BaseNet.java.
+    private var underlyingCb: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var baseNet: Network? = null
+    private var baseNetTried = 0L
+    @Volatile private var baseNetStarting = false
+    private var baseNetAttempts = 0
+
+    private fun watchUnderlying() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val req = NetworkRequest.Builder().clearCapabilities()
+            .addTransportType(TRANSPORT_TEST)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)   // never lean on ourselves
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(n: Network) {
+                baseNet = n
+                log("base network $n: VPN unmetered")
+                setUnderlyingNetworks(arrayOf(n))
+            }
+            override fun onLost(n: Network) {
+                if (baseNet != n) return
+                baseNet = null
+                setUnderlyingNetworks(null)
+                if (stopping) return
+                log("base network $n lost: VPN metered until it is back")
+                main.removeCallbacks(baseNetCheck); main.postDelayed(baseNetCheck, BASENET_CHECK_MS)
+            }
+        }
+        try { cm.registerNetworkCallback(req, cb); underlyingCb = cb }
+        catch (ex: Exception) { log("cannot watch base networks: $ex"); return }
+        baseNetAttempts = 0
+        main.removeCallbacks(baseNetCheck); main.postDelayed(baseNetCheck, BASENET_CHECK_MS)
+    }
+
+    private fun unwatchUnderlying() {
+        main.removeCallbacks(baseNetCheck); main.removeCallbacks(baseNetCheckLater)
+        baseNet = null
+        val cb = underlyingCb ?: return
+        underlyingCb = null
+        try { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) } catch (_: Exception) {}
+    }
+
+    /** No base network shortly after the bridge came up (or after it was lost): start BaseNet. */
+    private val baseNetCheck: Runnable = Runnable {
+        if (stopping || !running || underlyingCb == null || baseNet != null || baseNetStarting) return@Runnable
+        if (baseNetAttempts >= BASENET_MAX_ATTEMPTS) return@Runnable
+        val wait = baseNetTried + BASENET_RETRY_MS - SystemClock.elapsedRealtime()
+        if (wait > 0) { main.postDelayed(baseNetCheckLater, wait); return@Runnable }
+        baseNetTried = SystemClock.elapsedRealtime()
+        baseNetStarting = true
+        baseNetAttempts++
+        Thread({
+            val again = try { startBaseNet() } finally { baseNetStarting = false }
+            // started but no network yet, or a passing failure: look again later; no adb or a
+            // refused key: not before the next bridge start (no dialog every minute)
+            if (again) main.postDelayed(baseNetCheckLater, BASENET_RETRY_MS)
+            else baseNetAttempts = BASENET_MAX_ATTEMPTS
+        }, "usbeth-basenet").start()
+    }
+    private val baseNetCheckLater: Runnable = Runnable { baseNetCheck.run() }
+
+    /** @return whether a later attempt makes sense */
+    private fun startBaseNet(): Boolean {
+        val apk = applicationInfo.sourceDir
+        val cls = BaseNet::class.java.name
+        // the anchored pattern spares the sh -c running this very line; a live instance would
+        // make the new one exit anyway (lock), but a stuck one must go
+        // adbd hangs up the session as soon as the shell exits: HUP ignored before the fork (the
+        // child inherits it) so that BaseNet survives even if it has not reached setsid yet
+        val cmd = "pkill -f '^app_process.* $cls'; trap '' HUP; " +
+            "CLASSPATH=$apk setsid nohup app_process /system/bin $cls $apk " +
+            "> $BASENET_LOG 2>&1 < /dev/null & sleep 1; echo started"
+        log("starting the base network (local adb)")
+        try {
+            val out = AdbLocal(this, ::log).shell(cmd).trim()
+            if (!out.endsWith("started")) log("base network: unexpected answer: $out")
+            return true
+        } catch (ex: java.net.ConnectException) {
+            log("base network: no local adb (network debugging off?); VPN stays metered")
+        } catch (ex: AdbLocal.AdbException) {
+            log("base network: ${ex.message}; VPN stays metered")
+        } catch (ex: Exception) {
+            log("base network: adb failed: ${ex.message ?: ex}")
+            return true
+        }
+        return false
+    }
+
     private fun shutdown(status: String = "Stopped") {
         // called from several threads (button, unplug, USB error...): only once
         if (!shutDown.compareAndSet(false, true)) return
@@ -894,6 +1009,7 @@ class EthVpnService : VpnService() {
             try { th.join(1500) } catch (_: InterruptedException) {}
         }
         async = false
+        unwatchUnderlying()
         try { tun?.close() } catch (_: Exception) {}
         tun = null; tunOut = null
         try { ecm?.close() } catch (_: Exception) {}

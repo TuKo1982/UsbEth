@@ -29,6 +29,8 @@ Written by **Renaud Schweingruber**. Free software under the
   connection that comes back at boot and after standby without touching the remote.
 - IPv6 is captured and dropped instead of leaking through Wi-Fi.
 - **Updates itself** from the GitHub releases, while the screen is off.
+- **Play Store updates and background downloads work without Wi-Fi**: an optional virtual
+  Ethernet card makes Android see the connection as unmetered (see below).
 
 ## How it works
 
@@ -112,6 +114,29 @@ dialog; older versions ask for one.
 
 From adb: `adb shell am start -n ch.tuko.usbeth/.MainActivity --ez checkupdate true`.
 
+### Play Store downloads without Wi-Fi (base network)
+
+Android treats a VPN that has no other network under it as **metered and congested**, whatever
+the VPN app declares. With the adapter as the only connection (Wi-Fi off, built-in port unused),
+Play Store updates then stay "Pending" forever, and other background jobs that wait for an
+unmetered network never run.
+
+UsbEth fixes this with a small helper, `BaseNet`, that creates a **virtual Ethernet card**.
+Android flags it unmetered and not congested, and the VPN declares it as its underlying network,
+so the connection is seen as unmetered. The card carries no traffic: the helper only answers its
+DHCP and ARP (fake gateway 198.18.0.1); everything still goes through the USB adapter.
+
+Creating such a card needs the permissions of the adb shell user, which an app cannot have. So
+UsbEth connects to the TV's own adb daemon (network debugging, `127.0.0.1:5555`) with its own key
+and starts `BaseNet` there, 5 s after the bridge comes up and again if it stops. The first time,
+the TV shows **"Allow debugging?" for `UsbEth@tv`: tick "Always allow" and press OK**. The helper
+runs until the next reboot (UsbEth starts it again then) and exits if UsbEth is uninstalled; its
+log is in `/data/local/tmp/usbeth-basenet.log`.
+
+Without network debugging, or if the key is refused, everything else works as before; only the
+connection stays metered (log: `VPN stays metered`). Turning Wi-Fi on and connecting it to any
+network also makes the VPN unmetered, without the helper.
+
 ## Good to know
 
 - Android shows the connection as a **VPN** (key icon), not as "Ethernet". All apps go through
@@ -119,7 +144,11 @@ From adb: `adb shell am start -n ch.tuko.usbeth/.MainActivity --ez checkupdate t
 - Each adapter has its own MAC address, so it gets its own IP from your router. Set up a DHCP
   reservation to keep a fixed address.
 - adb over the network goes through the bridge too: `adb connect <bridge-ip>:5555`.
-- Detailed log: `adb logcat -s UsbEth`. The first line of each start names the version and author.
+- Detailed log: on the app screen, or over adb in
+  `/sdcard/Android/data/ch.tuko.usbeth/files/usbeth.log` (`adb logcat -s UsbEth` too on some
+  TVs). The first line of each start names the version and author.
+- UsbEth's adb key gives it the rights of the adb shell user, used only to start `BaseNet`. To
+  revoke it: Developer options, *Revoke USB debugging authorizations*.
 
 ## Building
 
@@ -165,6 +194,8 @@ TV=192.168.1.50:5555 ./deploy.sh
 | `MainActivity.kt` | USB permission, VPN consent, status screen |
 | `BootReceiver.kt` | Restart at boot and after an update |
 | `Updater.kt` | Update from the GitHub releases (checksum and signature checks, install) |
+| `BaseNet.java` | Virtual Ethernet card under the VPN (runs as the adb shell user), answers its DHCP and ARP |
+| `AdbLocal.kt` | Minimal adb client for the TV's own adb daemon, starts `BaseNet` |
 | `UsbAutoOkService.kt` | Optional accessibility service confirming the USB dialog |
 | `UsbUtil.kt`, `Net.kt` | Adapter detection, byte and IPv4 helpers |
 | `Credits.kt` | Version and author shown on screen and in the log |

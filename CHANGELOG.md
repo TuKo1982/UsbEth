@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 - 2026-11-19
+
+- Play Store updates stayed "Pending" when the adapter was the only connection: Android treats a
+  VPN with no network under it as metered and congested, whatever the VPN declares
+  (`setMetered(false)` is ignored then), so downloads and other background jobs waiting for an
+  unmetered network never ran.
+- New `BaseNet` helper: a virtual Ethernet card (TAP test interface adopted by the Ethernet
+  service) that Android flags unmetered and not congested; the VPN declares it as its underlying
+  network. It carries no traffic, it only answers its own DHCP and ARP.
+- The helper needs the adb shell user's permissions: UsbEth starts it through the TV's own adb
+  daemon (network debugging) with its own key, 5 s after the bridge is up and again if it stops
+  (3 attempts per bridge start). The first time, allow `UsbEth@tv` ("Always allow").
+- The log is also written to `Android/data/ch.tuko.usbeth/files/usbeth.log`, readable over adb.
+
 ## 1.2.3 - 2026-11-03
 
 - Auto-OK: the "open USB Ethernet?" dialog could stay on screen after a wake-up until someone
